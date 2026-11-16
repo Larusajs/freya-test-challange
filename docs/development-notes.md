@@ -88,3 +88,19 @@ Genişletilmiş canlı RTC testinin tamamı başarılı: müşteri teyidi → do
 reserve_delivery başarıyla booking_id döndürdüğünde RunContext speech_handle tamamlanma callback'i kaydediliyor. Son rezervasyon özeti ve iyi günler mesajı aynı konuşma turunda seslendiriliyor; bu sırada kesme ve yeni mikrofon girişi kapatılıyor. Son ses tamamlanınca LiveKit odası silinerek tüm katılımcılar çıkarılıyor, oturum ve job kapanıyor. Böylece tool içinden kendi speech_handle'ını bekleyen bir döngü oluşmuyor. Mevcut rezervasyonun yeniden onayında da aynı kapanış uygulanıyor. Başarısız rezervasyon callback kaydetmiyor ve görüşme açık kalıyor. Son söz tamamlanmadan delete_room çalışmaması ve başarısız işlemde kapanmama regresyonlarıyla toplam 30 test başarılı.
 
 Canlı RTC testinde c1'in mevcut rezervasyonu korunarak onaylandı. Son “iyi günler” transkripti katılımcıya ulaştıktan sonra sunucu odayı kapattı ve katılımcı otomatik disconnected durumuna geçti. Görüşme sonucu existing_booking_confirmed olarak saklandı; mevcut rezervasyon değiştirilmedi. API/worker arka planda çalışmaya devam ediyor.
+
+## Yanlış muhatapta otomatik kapanış
+
+Kullanıcının Mehmet/Enes görüşmesi veritabanında incorrect_details ve verified=0 olarak doğru kaydedilmişti. Eksik davranış, confirm_recipient negatif sonuçlarının otomatik kapanışa bağlanmamasıydı. Artık other_person ve incorrect_details sonuçları kaydedildikten sonra sabit özür/veda okunuyor; aynı speech_handle tamamlanınca oda siliniyor ve job yanlış muhatap sonucuyla kapanıyor. Ayrıca finish_call istemeye veya karşı tarafın tekrar veda etmesine gerek yok. Kayıtlı müşteri kimliği ve telefon bilgisi değiştirilmez. Gerçek geçici SQLite üzerinde her iki sonuç için kayıt, doğrulanmamış durum ve vedadan önce kapanmama regresyonuyla 31 test başarılı.
+
+Açık yanlış isim/yanlış numara yanıtları için dar, tam eşleşmeli yerel yönlendirme eklendi; gerçek confirm_recipient aracı çağrılmaya devam ediyor ve müşteri kaydı değiştirilmiyor. Belirsiz ifadeler modele bırakılıyor. 32 test başarılı. Aynı Mehmet/Enes ifadesiyle canlı RTC testi: incorrect_details kaydı doğru, son veda katılımcıya ulaştı, sunucu bağlantıyı otomatik kapattı. Üç kontrol de başarılı.
+
+## Müşteri bazlı iki deneme ve aranmama tercihi
+
+`customers` tablosuna kalıcı `verification_failures`, `do_not_call`, `do_not_call_at` alanları eklendi. Önceki görüşmelerdeki başarısız doğrulamalar tek seferlik migration ile sayılır. İki başarısızlıktan sonra müşteri kilitlenir; yeni görüşme ve uygulama yeniden başlatma sınırı aşamaz. Geçersiz tarih hak tüketmez, doğru ikinci giriş doğrulanabilir; otomatik sıfırlama yoktur.
+
+Açık aranmama talebi, muhatap teyidinden sonra doğrulama gerektirmeden kaydedilir; bekleyen geri arama kayıtları iptal edilir. Mevcut rezervasyon korunur. Agent vedadan sonra odayı kapatır. Panel hem aranmama hem doğrulama kilidini gösterir ve yeni görüşme başlatmayı engeller. Sunucu aynı kontrolleri bağımsız uygular.
+
+## Geri aranma kaydı sonrası kapanış
+
+request_callback başarılı callback_id/pending sonucu döndürdüğünde aynı güvenli kapanış mekanizmasına bağlandı. Kaydın başarılı olduğu sabit teşekkür/veda mesajı tamamlandıktan sonra oda kapanıyor; başarısız kayıt görüşmeyi kapatmıyor. Başarıda vedadan önce oda silinmemesi ve hatada açık kalma testleriyle mevcut test seti toplam 41 test başarılı. Servisler güncel kodla arka planda yeniden başlatıldı.

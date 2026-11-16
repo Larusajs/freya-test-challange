@@ -23,6 +23,11 @@ def slots_reply(slots):
 def tool_reply(name, result):
     if not isinstance(result, dict) or result.get('error'):
         return None
+    if name == 'opt_out_calls' and result.get('do_not_call'):
+        return ('Tekrar aranmama tercihinizi kaydettim. Bekleyen geri aranma talepleriniz iptal edildi. '
+                'Mevcut teslimat rezervasyonunuz varsa korunur. İyi günler dilerim.')
+    if name == 'confirm_recipient' and result.get('status') in ('other_person', 'incorrect_details'):
+        return 'Rahatsız ettiğim için kusura bakmayın. Yanlış numara bilgisini sisteme kaydediyorum. İyi günler dilerim.'
     if name == 'confirm_recipient' and result.get('recipient_status') == 'self':
         return ('Teşekkür ederim. Görüşmek için müsaitseniz kimliğinizi doğrulamak üzere '
                 'doğum tarihinizi gün, ay ve yıl olarak öğrenebilir miyim?')
@@ -47,4 +52,6 @@ def tool_reply(name, result):
                 'Kartınızı yalnızca siz, kimliğinizi göstererek teslim alabilirsiniz. Teşekkür ederim, iyi günler dilerim.')
     if name == 'finish_call' and result.get('status') == 'existing_booking_confirmed':
         return 'Mevcut teslimat planınız onaylandı. Teşekkür ederim, iyi günler dilerim.'
+    if name == 'request_callback' and result.get('callback_id') and result.get('status') == 'pending':
+        return 'Geri aranma talebinizi kaydettim. Anlayışınız için teşekkür ederim, iyi günler dilerim.'
     return None

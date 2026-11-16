@@ -71,7 +71,7 @@ backend/tests/                İş kuralı ve eşzamanlılık testleri
 docs/                         Case analizi ve sonraki geliştirmeler
 ```
 
-Agent'in araçları veri servisiyle aynı Python servis katmanını çağırır. Araç girdilerinde müşteri kimliği yoktur; görüşme kimliği sunucudaki dispatch metadata'sından gelir. Doğum tarihi modele verilmez. Tarih doğrulama, üç deneme sınırı, ilçe kontrolü, tek rezervasyon, terminal durum ve kapasite kontrolü SQL/Python tarafında uygulanır. `BEGIN IMMEDIATE` eşzamanlı son yer yarışında iki rezervasyonu engeller. Aynı rezervasyonun tekrarı idempotenttir.
+Agent'in araçları veri servisiyle aynı Python servis katmanını çağırır. Araç girdilerinde müşteri kimliği yoktur; görüşme kimliği sunucudaki dispatch metadata'sından gelir. Doğum tarihi modele verilmez. Tarih doğrulama, müşteri bazlı iki başarısız deneme sınırı, ilçe kontrolü, tek rezervasyon, terminal durum ve kapasite kontrolü SQL/Python tarafında uygulanır. `BEGIN IMMEDIATE` eşzamanlı son yer yarışında iki rezervasyonu engeller. Aynı rezervasyonun tekrarı idempotenttir.
 
 Müşterinin açık onayı prompt ve `confirmed` araç alanıyla temsil edilir. Bu alan model tarafından doldurulur; bağımsız kullanıcı onay kanıtı değildir. Üretimde onay kanıtı ve güçlü doğrulama ayrıca tasarlanmalıdır.
 
@@ -92,7 +92,7 @@ Bu çalışma ortamında npm/PyPI DNS erişimi başarısız olduğundan bağıml
 ## Demo senaryoları
 
 1. Ayşe: doğru doğum tarihi → Kadıköy saati → kimlikle şahsen teslim koşulu → açık onay → rezervasyon.
-2. Yanlış doğum tarihi → üç denemede kilit → rezervasyon yok.
+2. Yanlış doğum tarihi → müşteri bazında iki başarısız denemede kilit → rezervasyon yok.
 3. Kadıköy'de iki yer dolduktan sonra üçüncü müşteri → uygun yer yok.
 4. Aynı son yer için iki görüşme → tek kazanan; diğerine tekrar sorgulama.
 5. “Komşuma bırakın”, başka ilçe, adres değişikliği → destek gerekli, rezervasyon yok.
@@ -104,7 +104,7 @@ Kaynaklar: [LiveKit quickstart](https://docs.livekit.io/agents/start/voice-ai/),
 
 Müşteri şimdi konuşamıyorsa asistan kesin gün/saat ve açık onay alarak `request_callback` aracını çağırır. Talep, kayıtlı müşteri ve numarayla ilişkilendirilir; doğum tarihi doğrulaması gerektirmez ve teslimat kapasitesi ayırmaz. Geçmiş veya saat dilimsiz zaman reddedilir. Aynı müşteri için tek bekleyen talep tutulur; aynı görüşmenin tekrar çağrısı çift kayıt oluşturmaz.
 
-`callback_requests` tablosu `initialize()` sırasında mevcut verilere dokunmadan eklenir. Panelin geri aranma bölümünde İstanbul saatiyle görünen talepler, geri arama yapıldıktan sonra tamamlandı veya iptal olarak işaretlenebilir. Bu akış operasyon takibi sağlar; otomatik telefon araması başlatmaz ve tercih edilen saatte kesin arama garantisi vermez. Doğrulama deneme sınırı görüşme bazlı kalır.
+`callback_requests` tablosu `initialize()` sırasında mevcut verilere dokunmadan eklenir. Panelin geri aranma bölümünde İstanbul saatiyle görünen talepler, geri arama yapıldıktan sonra tamamlandı veya iptal olarak işaretlenebilir. Bu akış operasyon takibi sağlar; otomatik telefon araması başlatmaz ve tercih edilen saatte kesin arama garantisi vermez. Doğrulama deneme sınırı müşteri bazında iki başarısız denemedir; yeni görüşmeyle sıfırlanmaz.
 
 ## Tek terminalden backend başlatma
 
@@ -132,3 +132,16 @@ Gemini yanıtları `generateContent` üzerinden alınır. Bu ortamda SSE streami
 503/504 verirken aynı modelin normal araç çağrıları başarılı olduğundan bu taşıma yolu
 kullanılır. Model yanıtı tamamlanınca ElevenLabs ses üretir; araç yürütme LiveKit'tedir.
 Gemini 3 thought signature değerleri araç yanıtı sonrası konuşma için korunur.
+
+
+## Doğrulama sınırı ve tekrar aranmama tercihi
+
+Müşterinin toplam iki başarısız doğum tarihi doğrulama hakkı vardır. Geçersiz/eksik tarih hak tüketmez; bir yanlışın ardından ikinci deneme doğruysa işlem devam eder. Başarısızlık sayacı müşteri bazında kalıcıdır, başarı veya yeni görüşme sayacı sıfırlamaz. İki başarısızlıktan sonra yeni görüşme, doğrulama ve geri aranma isteği engellenir; otomatik süreli açılma yoktur. Eski görüşmelerin deneme kayıtları migration sırasında başarısızlık sayacına aktarılır.
+
+Muhatap kendisi olduğunu teyit ettikten sonra doğum tarihi doğrulaması gerekmeksizin açıkça tekrar aranmama talebi verebilir. `opt_out_calls` müşteri üzerinde `do_not_call` ve talep zamanını kaydeder, bekleyen geri aranma taleplerini iptal eder ve yeni görüşmeleri engeller. Teslimat rezervasyonları korunur. Agent tercih kaydedildikten sonra vedayı okuyup görüşmeyi kapatır. Sadece şimdi müsait olmamak veya görüşmeyi reddetmek kalıcı aranmama tercihi sayılmaz. Bu tercihi konuşmadan geri açan araç yoktur. Panel müşteri seçiminin yanında engeli gösterir ve görüşme başlatmayı kapatır.
+
+## Yanlış numara / hatalı kayıt engeli
+
+`incorrect_details` sonucu artık yalnız görüşmeye değil müşteriye de kaydedilir. `customers.contact_review_status=pending`, bildirim zamanı ve kaynak görüşme tutulur. Mevcut yanlış kayıt bildirimleri migration sırasında müşteri etiketine aktarılır. Yeni görüşme ve geri aranma talebi backend'de engellenir; bekleyen geri arama talepleri iptal edilir. Önceden açılmış görüşmeler de müşterinin engelini aşarak doğrulama veya rezervasyon yapamaz. Mevcut teslimat kaydı korunur.
+
+Panel müşteri seçeneğinde etiketi, seçim altında açıklamayı ve ayrı kayıt inceleme listesini gösterir; görüşme başlatma düğmesi kapanır. Telefonu yakınının açması (`other_person`) kalıcı yanlış numara engeli oluşturmaz. Kayıt düzeltme ve engeli yeniden açma arayüzü bu değişiklikte eklenmedi; inceleme etiketi otomatik temizlenmez.

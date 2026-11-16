@@ -8,8 +8,10 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from uuid import uuid4
 from google.genai import types
 from livekit import agents
+from livekit.agents import llm as agent_llm
 from livekit.agents import (Agent, AgentServer, AgentSession, function_tool,
                             APIError, APIConnectOptions, SessionConnectOptions, RunContext, get_job_context)
 from livekit.plugins import elevenlabs, google, silero
@@ -58,8 +60,30 @@ class DeliveryAgent(Agent):
     async def llm_node(self, chat_ctx, tools, model_settings):
         if chat_ctx is not None and chat_ctx.items:
             last = chat_ctx.items[-1]
+            if not self._recipient_unknown and last.type == "message" and last.role == "user":
+                text = " ".join(re.sub(r"[^\w\s]", " ", last.text_content.lower()).split())
+                if text in {"beni aramayın", "bir daha aramayın", "beni bir daha aramayın",
+                            "tekrar aranmak istemiyorum", "bir daha aranmak istemiyorum"}:
+                    yield agent_llm.ChatChunk(id=str(uuid4()), delta=agent_llm.ChoiceDelta(
+                        role="assistant", tool_calls=[agent_llm.FunctionToolCall(
+                            call_id=str(uuid4()), name="opt_out_calls",
+                            arguments=json.dumps({"confirmed": True}),
+                        )]))
+                    return
             if self._recipient_unknown and last.type == "message" and last.role == "user":
                 acknowledgment = " ".join(re.sub(r"[^\w\s]", " ", last.text_content.lower()).split())
+                # Explicit wrong-number/name denials do not need a model request.
+                denied_name = re.fullmatch(r"(?:(?:yok|hayır) )*benim adım (\w+(?: \w+)?)", acknowledgment)
+                wrong_number = acknowledgment in {"yanlış numara", "hayır yanlış numara",
+                    "yanlış kişiyi aradınız", "yanlış kişiyi arıyorsunuz", "bu kişi ben değilim",
+                    "ben o kişi değilim"}
+                if wrong_number or (denied_name and denied_name[1].split()[0] != self.customer_address.split()[0].lower()):
+                    yield agent_llm.ChatChunk(id=str(uuid4()), delta=agent_llm.ChoiceDelta(
+                        role="assistant", tool_calls=[agent_llm.FunctionToolCall(
+                            call_id=str(uuid4()), name="confirm_recipient",
+                            arguments=json.dumps({"recipient_status": "incorrect_details"}),
+                        )]))
+                    return
                 if acknowledgment in {"evet", "evet benim", "evet buyurun", "benim buyurun",
                                        "evet benim şu anda görüşmek için müsaitim",
                                        "evet benim müsaitim", "evet benim buyurun"}:
@@ -144,9 +168,14 @@ class DeliveryAgent(Agent):
             yield message
 
     @function_tool
-    async def confirm_recipient(self, recipient_status: str) -> dict:
-        """Yanıta göre self (müşterinin kendisi), other_person (başkası), incorrect_details (yanlış numara/kayıt) kaydet."""
-        return self._run(store.confirm_recipient, recipient_status)
+    async def confirm_recipient(self, context: RunContext, recipient_status: str) -> dict:
+        """Muhatabı self, other_person veya incorrect_details olarak kaydet. Yanlış muhatapta vedadan sonra görüşme otomatik kapanır."""
+        result = self._run(store.confirm_recipient, recipient_status)
+        if result.get("status") in ("other_person", "incorrect_details"):
+            self._recipient_unknown = False
+            self._awaiting_birth_date = False
+            self._end_after_playout(context, reason=result["status"])
+        return result
 
     @function_tool
     async def get_existing_booking(self) -> dict:
@@ -181,7 +210,7 @@ class DeliveryAgent(Agent):
             self._end_after_playout(context)
         return result
 
-    def _end_after_playout(self, context: RunContext):
+    def _end_after_playout(self, context: RunContext, reason: str = "delivery_completed"):
         if self._ending_call:
             return
         self._ending_call = True
@@ -190,21 +219,34 @@ class DeliveryAgent(Agent):
 
         def spoken(_handle):
             # The tool follow-up shares this handle. Do not await it inside its own tool.
-            self._end_call_task = asyncio.create_task(self._close_completed_room(context.session))
+            self._end_call_task = asyncio.create_task(self._close_completed_room(context.session, reason))
 
         context.speech_handle.add_done_callback(spoken)
 
-    async def _close_completed_room(self, session):
+    async def _close_completed_room(self, session, reason: str = "delivery_completed"):
         job = get_job_context()
-        logger.info("Closing completed delivery call after final speech")
+        logger.info("Closing terminal call after final speech: reason=%s", reason)
         await job.delete_room()
         session.shutdown()
-        job.shutdown(reason="delivery_completed")
+        job.shutdown(reason=reason)
 
     @function_tool
-    async def request_callback(self, requested_at: str, confirmed: bool) -> dict:
-        """Açık onayla geri aranma isteği kaydet. requested_at saat dilimli ISO tarih/saat olmalı."""
-        return self._run(store.request_callback, requested_at, confirmed)
+    async def opt_out_calls(self, context: RunContext, confirmed: bool) -> dict:
+        """Müşterinin açık tekrar aranmama talebini kaydet; bekleyen geri aramaları iptal et."""
+        result = self._run(store.opt_out_calls, confirmed)
+        if result.get("do_not_call"):
+            self._verified_context = None
+            self._awaiting_birth_date = False
+            self._end_after_playout(context, reason="do_not_call")
+        return result
+
+    @function_tool
+    async def request_callback(self, context: RunContext, requested_at: str, confirmed: bool) -> dict:
+        """Açık onayla geri aranma isteği kaydet. Başarılı kayıttan ve vedadan sonra görüşme otomatik kapanır."""
+        result = self._run(store.request_callback, requested_at, confirmed)
+        if result.get("callback_id") and result.get("status") == "pending":
+            self._end_after_playout(context, reason="callback_requested")
+        return result
 
     @function_tool
     async def finish_call(self, context: RunContext, outcome: str) -> dict:

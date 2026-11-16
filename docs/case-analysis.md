@@ -32,7 +32,7 @@ Kart yalnız kart sahibine, kimliği görülerek teslim edilir. Toplam 7 yer var
 - PDF kesin takvim tarihi vermiyor. Senaryo haftası 16 Kasım 2026 Pazartesiye sabitlendi; teslimatlar 19/20 Kasım. Böylece demo, çalıştırıldığı gün nedeniyle bozulmaz. Bu bir simülasyondur: gerçek geçmiş tarih engeli henüz yok.
 - `DEMO_WEEK_START` pazartesi olmalı. Seed tekrarında veri ezilmez. Hafta değiştirmek için yeni `DATABASE_PATH` kullan; mevcut rezervasyonları sessizce başka tarihe taşımıyoruz.
 - Gerçek sokak adresi verilmediğinden yalnız ilçe ve adres tipi tutulur. Adres değişikliği alınmaz.
-- Demo kimlik kontrolü doğum tarihi ve 3 deneme. Bu, gerçek banka için yeterli değildir. Deneme sınırı görüşme bazlıdır; yeni görüşmeyle sıfırlanır.
+- Demo kimlik kontrolü doğum tarihi ve müşteri bazında iki başarısız deneme. Bu, gerçek banka için yeterli değildir. Yeni görüşme veya başarılı doğrulama sayacı sıfırlamaz; otomatik süreli sıfırlama yoktur.
 - Tek müşteri tek rezervasyon. Mevcut rezervasyonu değiştirme/iptal ilk sürüm dışında.
 - Yer, konuşma sırasında tutulmaz; yalnız açık onayla rezervasyon anında tüketilir. Yarış kaybedilirse tekrar müsaitlik sorulur.
 - Uygun saat yok/ret/destek gerekli sonuçları kaydedilir. İnsan destek kuyruğu veya gerçek aktarım henüz yok.
@@ -40,7 +40,7 @@ Kart yalnız kart sahibine, kimliği görülerek teslim edilir. Toplam 7 yer var
 
 ## Başarı ölçümü
 
-İş kuralları için deterministik testler: seed doğruluğu, doğrulamasız veri erişiminin engellenmesi, 3 yanlış deneme, doğru ilçe, açık onay alanı, tek rezervasyon, idempotency, kapanan görüşmenin işlem yapamaması, eşzamanlı son yer ve kapasite tükenmesi. Canlı model değerlendirmesi ayrı yapılmalı: Türkçe tarih anlama, araç sırası, onay isteme, başarısız araç sonrası dürüst yanıt, araya girme, yanıt gecikmesi ve görüşme tamamlama oranı.
+İş kuralları için deterministik testler: seed doğruluğu, doğrulamasız veri erişiminin engellenmesi, müşteri bazında iki yanlış deneme, doğru ilçe, açık onay alanı, tek rezervasyon, idempotency, kapanan görüşmenin işlem yapamaması, eşzamanlı son yer ve kapasite tükenmesi. Canlı model değerlendirmesi ayrı yapılmalı: Türkçe tarih anlama, araç sırası, onay isteme, başarısız araç sonrası dürüst yanıt, araya girme, yanıt gecikmesi ve görüşme tamamlama oranı.
 
 ## PDF teslim koşulları
 

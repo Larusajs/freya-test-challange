@@ -70,7 +70,28 @@ def initialize():
         columns = {r["name"] for r in db.execute("PRAGMA table_info(calls)")}
         if "recipient_status" not in columns:
             db.execute("ALTER TABLE calls ADD COLUMN recipient_status TEXT NOT NULL DEFAULT 'unknown'")
-        db.executemany("INSERT OR IGNORE INTO customers VALUES (?,?,?,?,?,?)", CUSTOMERS)
+        customer_columns = {r["name"] for r in db.execute("PRAGMA table_info(customers)")}
+        if "verification_failures" not in customer_columns:
+            db.execute("ALTER TABLE customers ADD COLUMN verification_failures INTEGER NOT NULL DEFAULT 0")
+            db.execute("""UPDATE customers SET verification_failures=MIN(2,COALESCE((
+                SELECT SUM(MAX(0,attempts-verified)) FROM calls WHERE customer_id=customers.id
+            ),0))""")
+        if "do_not_call" not in customer_columns:
+            db.execute("ALTER TABLE customers ADD COLUMN do_not_call INTEGER NOT NULL DEFAULT 0")
+            db.execute("ALTER TABLE customers ADD COLUMN do_not_call_at TEXT")
+        if "contact_review_status" not in customer_columns:
+            db.execute("ALTER TABLE customers ADD COLUMN contact_review_status TEXT NOT NULL DEFAULT 'clear'")
+            db.execute("ALTER TABLE customers ADD COLUMN contact_issue_at TEXT")
+            db.execute("ALTER TABLE customers ADD COLUMN contact_issue_call_id TEXT REFERENCES calls(id)")
+            db.execute("""UPDATE customers SET contact_review_status='pending',
+                contact_issue_call_id=(SELECT id FROM calls WHERE customer_id=customers.id
+                    AND status='incorrect_details' ORDER BY created_at DESC,rowid DESC LIMIT 1),
+                contact_issue_at=(SELECT created_at FROM calls WHERE customer_id=customers.id
+                    AND status='incorrect_details' ORDER BY created_at DESC,rowid DESC LIMIT 1)
+                WHERE EXISTS(SELECT 1 FROM calls WHERE customer_id=customers.id AND status='incorrect_details')""")
+            db.execute("""UPDATE callback_requests SET status='cancelled' WHERE status='pending'
+                AND customer_id IN (SELECT id FROM customers WHERE contact_review_status='pending')""")
+        db.executemany("INSERT OR IGNORE INTO customers(id,name,phone,birth_date,district,address_type) VALUES (?,?,?,?,?,?)", CUSTOMERS)
         for sid, district, offset, start, end, capacity in [
             ("s1", "Kadıköy", 3, "09:00", "13:00", 1),
             ("s2", "Kadıköy", 4, "14:00", "18:00", 1),
@@ -84,7 +105,8 @@ def initialize():
 def dashboard():
     with connection() as db:
         customers = [dict(r) for r in db.execute("""
-            SELECT c.id,c.name,c.phone,c.district,c.address_type,b.slot_id
+            SELECT c.id,c.name,c.phone,c.district,c.address_type,c.do_not_call,c.verification_failures,
+                c.contact_review_status,c.contact_issue_at,b.slot_id
             FROM customers c LEFT JOIN bookings b ON b.customer_id=c.id ORDER BY c.id
         """)]
         slots = [dict(r) for r in db.execute("""
@@ -106,8 +128,11 @@ def dashboard():
 
 def create_call(customer_id):
     with connection() as db:
-        if not db.execute("SELECT 1 FROM customers WHERE id=?", (customer_id,)).fetchone():
+        db.execute("BEGIN IMMEDIATE")
+        customer = db.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
+        if not customer:
             raise RuleError("Müşteri bulunamadı.")
+        _contact_allowed(customer)
         call_id = str(uuid4())
         db.execute("INSERT INTO calls(id,customer_id) VALUES (?,?)", (call_id, customer_id))
     return call_id
@@ -123,24 +148,29 @@ def call_customer(call_id):
 def verify(call_id, birth_date):
     # ISO format is validated, expected date is never returned to the model.
     try:
-        date.fromisoformat(birth_date)
-    except ValueError:
+        birth_date = date.fromisoformat(birth_date).isoformat()
+    except (ValueError, TypeError):
         raise RuleError("Tarihi YYYY-MM-DD biçiminde iletin.") from None
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute("""SELECT k.*,c.birth_date FROM calls k JOIN customers c
+        row = db.execute("""SELECT k.*,c.birth_date,c.verification_failures,c.do_not_call,c.contact_review_status FROM calls k JOIN customers c
             ON c.id=k.customer_id WHERE k.id=?""", (call_id,)).fetchone()
-        if not row or row["attempts"] >= 3 or row["status"] != "started":
+        if not row or row["status"] != "started":
             raise RuleError("Doğrulama yapılamıyor; görüşmeyi sonlandırın.")
+        _contact_allowed(row)
         if row["recipient_status"] != "self":
             raise RuleError("Önce aranan müşteriyle görüşüldüğünü teyit edin.")
         if row["verified"]:
             return {"verified": True, "booking": _existing_booking(db, row["customer_id"])}
         ok = birth_date == row["birth_date"]
         db.execute("UPDATE calls SET verified=?, attempts=attempts+1 WHERE id=?", (ok, call_id))
-        if not ok and row["attempts"] == 2:
-            db.execute("UPDATE calls SET status='verification_failed' WHERE id=?", (call_id,))
-        result = {"verified": ok, "remaining_attempts": 2-row["attempts"]}
+        failures = row["verification_failures"] + (not ok)
+        if not ok:
+            db.execute("UPDATE customers SET verification_failures=? WHERE id=?", (failures, row["customer_id"]))
+        if failures >= 2:
+            db.execute("UPDATE calls SET status='verification_failed' WHERE customer_id=? AND status='started'",
+                       (row["customer_id"],))
+        result = {"verified": ok, "remaining_attempts": 2-failures}
         if ok:
             result["booking"] = _existing_booking(db, row["customer_id"])
         return result
@@ -158,6 +188,12 @@ def confirm_recipient(call_id, recipient_status):
         status = "started" if recipient_status == "self" else recipient_status
         db.execute("UPDATE calls SET recipient_status=?,status=?,verified=CASE WHEN ?='self' THEN verified ELSE 0 END WHERE id=?",
                    (recipient_status, status, recipient_status, call_id))
+        if recipient_status == "incorrect_details":
+            db.execute("""UPDATE customers SET contact_review_status='pending',
+                contact_issue_at=CURRENT_TIMESTAMP,contact_issue_call_id=? WHERE id=?""",
+                (call_id, call["customer_id"]))
+            db.execute("UPDATE callback_requests SET status='cancelled' WHERE customer_id=? AND status='pending'",
+                       (call["customer_id"],))
         return {"recipient_status": recipient_status, "status": status}
 
 
@@ -175,9 +211,11 @@ def existing_booking(call_id):
         return {"booking": _existing_booking(db, call["customer_id"])}
 
 def authorized(db, call_id):
-    row = db.execute("SELECT * FROM calls WHERE id=?", (call_id,)).fetchone()
+    row = db.execute("""SELECT k.*,c.do_not_call,c.verification_failures,c.contact_review_status FROM calls k
+        JOIN customers c ON c.id=k.customer_id WHERE k.id=?""", (call_id,)).fetchone()
     if not row or row["recipient_status"] != "self" or not row["verified"] or row["status"] not in ("started", "booked"):
         raise RuleError("Önce kimlik doğrulaması gerekli.")
+    _contact_allowed(row)
     return row
 
 def available_slots(call_id):
@@ -251,6 +289,8 @@ def request_callback(call_id, requested_at, confirmed):
         call = db.execute("SELECT * FROM calls WHERE id=?", (call_id,)).fetchone()
         if not call:
             raise RuleError("Görüşme bulunamadı.")
+        customer = db.execute("SELECT * FROM customers WHERE id=?", (call["customer_id"],)).fetchone()
+        _contact_allowed(customer)
         existing = db.execute("SELECT * FROM callback_requests WHERE call_id=?", (call_id,)).fetchone()
         if existing:
             if existing["requested_at"] == normalized and existing["status"] == "pending":
@@ -286,3 +326,32 @@ def resolve_callback(callback_id, status):
             raise RuleError("Kapanmış talebin sonucu değiştirilemez.")
         db.execute("UPDATE callback_requests SET status=? WHERE id=?", (status, callback_id))
     return {"callback_id": callback_id, "status": status}
+
+
+def _contact_allowed(customer):
+    if customer["contact_review_status"] == "pending":
+        raise RuleError("Yanlış numara veya hatalı müşteri kaydı bildirildi; kayıt incelenip düzeltilene kadar aramaya kapalı.")
+    if customer["do_not_call"]:
+        raise RuleError("Müşteri tekrar aranmak istemiyor; yeni görüşme veya geri aranma oluşturulamaz.")
+    if customer["verification_failures"] >= 2:
+        raise RuleError("Müşterinin iki doğrulama denemesi doldu; banka desteğine başvurulmalı.")
+
+
+def opt_out_calls(call_id, confirmed):
+    """Persist an explicit request from the intended recipient; never cancel a booking."""
+    if confirmed is not True:
+        raise RuleError("Tekrar aranmama için müşterinin açık talebi gerekli.")
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        call = db.execute("SELECT * FROM calls WHERE id=?", (call_id,)).fetchone()
+        if not call or call["recipient_status"] != "self":
+            raise RuleError("Aranmama tercihi yalnız aranan müşteriden alınabilir.")
+        if call["status"] in ("other_person", "incorrect_details"):
+            raise RuleError("Yanlış muhatap adına tercih kaydedilemez.")
+        db.execute("UPDATE customers SET do_not_call=1,do_not_call_at=COALESCE(do_not_call_at,CURRENT_TIMESTAMP) WHERE id=?",
+                   (call["customer_id"],))
+        db.execute("UPDATE callback_requests SET status='cancelled' WHERE customer_id=? AND status='pending'",
+                   (call["customer_id"],))
+        db.execute("UPDATE calls SET status='do_not_call' WHERE customer_id=? AND status IN ('started','callback_requested')",
+                   (call["customer_id"],))
+    return {"status": "do_not_call", "do_not_call": True}
